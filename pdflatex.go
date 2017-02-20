@@ -11,6 +11,7 @@ import (
 )
 
 const (
+	// TODO(amit): Make this configurable.
 	latexExec = "/usr/local/texlive/2016/bin/x86_64-linux/pdflatex"
 	outDir    = "tex_files"
 )

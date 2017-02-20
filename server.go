@@ -2,7 +2,6 @@ package main
 
 /*
 TODO:
-- Extract compilation code to its own function.
 - Report HTTP error codes.
 - Resolve GET/POST interface.
 - Make more customizable - port, pdflatex, etc.
