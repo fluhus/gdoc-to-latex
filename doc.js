@@ -2,9 +2,9 @@
 
 /*
 TODO:
-- Add more functions to equations.
 - Handle bold, italics, etc.
-- Handle double new lines?
+- Add more functions to equations.
+- Handle new lines in list items.
 */
 
 // ----- MAIN ENTRY POINTS --------------------------------------------------
@@ -26,7 +26,8 @@ function encodeDocument() {
     // Display link to PDF.
     var url = TEX_SERVER + "/pdf?id=" + getId(tex);
     var msg = "Open <a href=\""+url+"\">this</a> in a new tab.<h2>Generated LaTeX</h2>" +
-      escapeHtml(tex.replace(/(\\includegraphics.*?)\{.*?\}/g, "$1{frog}"));
+//      escapeHtml(tex.replace(/(\\includegraphics.*?)\{.*?\}/g, "$1{frog}"));
+      escapeHtml(tex);
     DocumentApp.getUi().showSidebar(HtmlService.createHtmlOutput(msg).setTitle("LaTeX"));
   } catch (e) {
     // Display error.
@@ -74,7 +75,7 @@ function encodeElement(e) {
       return encodeImage(e);
     default:
       Logger.log("Unknown type: " + e.getType());
-      return "{[}" + e.getType() + "{]}";
+      return "{[}" + e.getType().toString().replace(/_/g, "\\_") + "{]}";
   }
 }
 
@@ -106,6 +107,13 @@ function encodeParagraph(e) {
     case DocumentApp.ParagraphHeading.HEADING3:
       return "\\subsubsection{" + encodeChildren(e) + "}\n";
     case DocumentApp.ParagraphHeading.NORMAL:
+      // Check if directive.
+      var rawText = e.getText();
+      if (rawText.length > 0 && rawText[0] == "#") {
+        var words = rawText.substr(1).split(" ");
+        return directives[words[0]].apply(this, words.slice(1));
+      }
+
       var text = encodeChildren(e);
       if (text == "") {
         // Empty paragraphs are essentially new lines, so prevent LaTeX from collapsing those.
@@ -120,10 +128,22 @@ function encodeParagraph(e) {
 
 // Encodes a TEXT element.
 function encodeText(e) {
-  var result = e.getText();
-  for (var i = 0; i < ESCAPE_CHARS.length; i++) {
-    var char = ESCAPE_CHARS[i][0];
-    var rep = ESCAPE_CHARS[i][1];
+  var text = e.getText();
+  var result = "";
+
+  // Encode each character with its style.
+  for (var i = 0; i < text.length; i++) {
+    result += styleTransition(e, i);
+    result += escapeChar(text.charAt(i));
+  }
+  if (text.length > 0) {
+    result += endStyle(e, text.length-1);
+  }
+
+  // Escape various stuff.
+  for (var i = 0; i < ESCAPE_SEQUENCES.length; i++) {
+    var char = ESCAPE_SEQUENCES[i][0];
+    var rep = ESCAPE_SEQUENCES[i][1];
     result = result.replace(char, rep);
   }
   if (!state.inMath) {
@@ -134,7 +154,7 @@ function encodeText(e) {
     }
   }
 
-  // In equations, LaTeX removes space so force it to keep them.
+  // In equations, LaTeX removes spaces so force it to keep them.
   if (e.getParent().getType() == DocumentApp.ElementType.EQUATION ||
       e.getParent().getType() == DocumentApp.ElementType.EQUATION_FUNCTION) {
     result = result.replace(/ /g, "\\ \\ ")
@@ -245,20 +265,22 @@ function encodeImage(e) {
   // Extract type.
   var b = e.getBlob();
   var t = b.getContentType();
-  Logger.log(typeof t);
   if (t.length <= 6 || t.substr(0, 6) != "image/") {
     throw "Bad blob type: " + t;
   }
   t = t.substr(6);
 
   var d = Utilities.base64EncodeWebSafe(b.getBytes());
+  var name = (state.imageNames.length == 0 ? "image-" + (state.images.length+1) : state.imageNames.shift());
+
   state.images.push({
+    name: name,
     type: t,
     data: d,
   });
 
   // 0.75 converts pixel to point.
-  return "\\includegraphics[height=" + e.getHeight()*0.75 + "pt,width=" + e.getWidth()*0.75 + "pt]{image-" + state.images.length + "}";
+  return "\\includegraphics[height=" + e.getHeight()*0.75 + "pt,width=" + e.getWidth()*0.75 + "pt]{" + name + "}";
 }
 
 // Encodes a FOOTNOTE element.
@@ -308,9 +330,12 @@ var state = {
   // escaping rules.
   inMath: false,
   // Contains image objects with fields-
-  // type: base64 encoded string representing the image type - "png", "jpeg", etc.
+  // name: name prefix of the file that hold the image.
+  // type: string representing the image type - "png", "jpeg", etc.
   // data: base64 encoded image data.
   images: [],
+  // File name prefixes of the next images.
+  imageNames: [],
 };
 
 // Checks whether other is on the same list as current. Current is assumed
@@ -321,12 +346,13 @@ function isOnSameList(current, other) {
       other.getListId() == current.getListId();
 }
 
-// Queries my pdflatex server for a document ID. Returns the ID as a string.
+// Queries pdflatex server for a document ID. Returns the ID as a string.
 function getId(s) {
   var payload = "src=" + encodeURIComponent(s);
   Logger.log(state.images.length + " images.")
   for (var i = 0; i < state.images.length; i++) {
     var img = state.images[i];
+    payload += "&image" + (i+1) + "name=" + img.name;
     payload += "&image" + (i+1) + "type=" + img.type;
     payload += "&image" + (i+1) + "data=" + img.data;
   }
@@ -349,6 +375,80 @@ function escapeHtml(s) {
   .replace(/'/g, "&#039;")
   .replace(/\n/g, "<br>");
 }
+
+// Returns a LaTeX escaped equivalent of the given character.
+function escapeChar(c) {
+  var e = ESCAPE_CHARS[c];
+  if (e) {
+    return e;
+  }
+  return c;
+}
+
+// Returns the LaTeX style directives that transist from style at i-1 to
+// the style at i. Returns an empty string if no style change. Effective
+// on i=0 as well.
+function styleTransition(e, i) {
+  if (!isStyleChange(e, i)) {
+    return "";
+  }
+  var result = "";
+  if (i > 0) {
+    result += endStyle(e, i-1);
+  }
+  result += beginStyle(e, i);
+  return result;
+}
+
+// Returns true if the styles of e at i is different from i-1. For i=0
+// always true.
+function isStyleChange(e, i) {
+  if (i == 0) {
+    return true;
+  }
+  return e.isBold(i) != e.isBold(i-1) ||
+    e.isItalic(i) != e.isItalic(i-1) ||
+      e.isUnderline(i) != e.isUnderline(i-1);
+}
+
+// Returns a string that begins the style of element e at position i.
+function beginStyle(e, i) {
+  var result = "";
+  if (e.isBold(i)) {
+    result += "\\textbf{";
+  }
+  if (e.isItalic(i)) {
+    result += "\\textit{";
+  }
+  if (e.isUnderline(i)) {
+    result += "\\underline{";
+  }
+  return result;
+}
+
+// Returns a string that ends the style of element e at position i.
+function endStyle(e, i) {
+  var result = "";
+  if (e.isUnderline(i)) {
+    result += "}";
+  }
+  if (e.isItalic(i)) {
+    result += "}";
+  }
+  if (e.isBold(i)) {
+    result += "}";
+  }
+  return result
+}
+
+// ----- DIRECTIVES --------------------------------------------------------
+
+directives = {
+  "image-name": function() {
+    state.imageNames.push.apply(state.imageNames, arguments);
+    return "";
+  },
+};
 
 // ----- CONSTANTS ---------------------------------------------------------
 
@@ -373,24 +473,27 @@ var GLYPH_TYPE_TO_LIST_TYPE = {
 };
 
 // Characters that should be escaped before posting in LaTeX code.
-var ESCAPE_CHARS = [
-  [/\\/g, "\\\textbackslash{}"],
-  [/\{/g, "\\{"],
-  [/\}/g, "\\}"],
-  [/\[/g, "{[}"],
-  [/\]/g, "{]}"],
-  [/&/g, "\\&"],
-  [/#/g, "\\#"],
-  [/(\W)[’'‘](\w)/g, "$1`$2"],
-  [/^[’'‘](\w)/g, "`$1"],
-  [/(\w)[’'‘]/g, "$1'"],
-  [/(\W)["“”](\w)/g, "$1``$2"],
-  [/^["“”](\w)/g, "``$1"],
-  [/(\w)["“”]/g, "$1''"],
-  [/TODO/g, "\\colorbox{yellow}{TODO}"],
-];
+var ESCAPE_CHARS = {
+  "\\": "\\\textbackslash{}",
+  "{": "\\{",
+  "}": "\\}",
+  "[": "{[}",
+  "]": "{]}",
+  "&": "\\&",
+  "#": "\\#",
+};
 
 // Characters that should be escaped only outside of math environment.
 var ESCAPE_CHARS_NO_MATH = [
   [/_/g, "\\_"],
+];
+
+var ESCAPE_SEQUENCES = [
+  [/(\W)[’'‘](\w)/g, "$1`$2"],
+  [/^[’'‘](\w)/g, "`$1"],
+  [/([\.\w])[’'‘]/g, "$1'"],
+  [/(\W)["“”](\w)/g, "$1``$2"],
+  [/^["“”](\w)/g, "``$1"],
+  [/([\.\w])["“”]/g, "$1''"],
+  [/TODO/g, "\\colorbox{yellow}{TODO}"],
 ];
